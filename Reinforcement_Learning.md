@@ -1168,3 +1168,242 @@ video_env.close()
 
 ### reward만 보고 판단
 - 잘못된 결론
+
+# ROS2 + 강화학습 연결 구조 설계 (실전 아키텍처)
+## 1. 목표
+- SB3와 ROS2를 **어떻게 연결하는지 구조 이해**
+- 토픽 / 서비스 / 액션을 RL 관점에서 해석 가능
+- 실제 로봇 제어용 강화학습 아키텍처 설계 가능
+- 기업 프로젝트 수준 설계 가능
+
+## 2. 전체 구조 (핵심)
+```
+[ Stable-Baselines3 ]
+        ↓
+    (action)
+        ↓
+[ ROS2 Node ]
+        ↓
+[ Robot / Simulator ]
+        ↓
+    (sensor data)
+        ↓
+[ State Processing ]
+        ↓
+    (reward)
+        ↓
+[ RL Environment ]
+        ↓
+[ SB3 학습 업데이트 ]
+```
+### 핵심 개념:
+- ROS2를 "Gym Environment로 감싸는 것"이 핵심
+
+## 3. ROS2 요소를 RL로 해석
+### ROS2 -> RL 매핑
+| ROS2 | RL |
+| --- | --- |
+| Topic (sensor) | Observation |
+| Topic (cmd_vel) | Action |
+| Node | Environment |
+| Service | Reset |
+| Action | Episode control |
+### 이 매핑이 이해되면 끝
+
+## 4. 코드 구조 (핵심 설계)
+### RL 환경 클래스
+```py
+class ROS2Env(gym.Env):
+
+    def __init__(self):
+        super().__init__()
+
+        self.observation_space = ...
+        self.action_space = ...
+
+    def reset(self):
+        # ROS2 서비스 호출 (환경 초기화)
+        return state, {}
+
+    def step(self, action):
+
+        # 1. ROS2 토픽으로 행동 전송
+        # publish(cmd_vel)
+
+        # 2. 센서 데이터 수신
+        # subscribe(sensor)
+
+        # 3. 상태 구성
+        state = ...
+
+        # 4. 보상 계산
+        reward = ...
+
+        # 5. 종료 조건
+        terminated = ...
+        truncated = False
+
+        return state, reward, terminated, truncated, {}
+```
+### 핵심
+- ROS2 전체를 step()안에 넣는다
+
+### 핵심 블록별로 요약
+### 🏗️ 1. 환경 정의 및 공간 설정 (__init__)
+- `class ROS2Env(gym.Env)`: ROS2 로봇 시뮬레이션(또는 실물 로봇)을 제어하기 위한 커스텀 Gym 환경 선언
+- `self.observation_space = ...`: 로봇이 받아올 센서 데이터(라이다, 카메라, 관절 각도 등)의 형태와 범위 정의
+- `self.action_space = ...`: 로봇에게 내릴 명령(바퀴 속도, 로봇 팔 제어 토크 등)의 가짓수나 범위 정의
+
+### 🔄 2. 로봇 위치 초기화 (reset)
+- `# ROS2 서비스 호출 (환경 초기화)`: 시뮬레이션 가상 세계(Gazebo/MuJoCo)나 로봇을 시작 위치로 강제 순간이동(Service Call) 시킴
+- `return state, {}`: 초기화된 로봇의 첫 상태(센서 값)를 AI 에이전트에게 전달하며 시작
+
+### 🏃♂️ 3. 로봇 제어 및 데이터 수집 (step)
+- `# 1. ROS2 토픽으로 행동 전송`: AI가 결정한 행동을 로봇이 알아들을 수 있는 속도 명령(cmd_vel 등) 토픽으로 발행(Publish)
+- `# 2. 센서 데이터 수신`: 행동을 취한 후 로봇이 움직였을 때의 레이저나 모터 센서 값을 구독(Subscribe)하여 수집
+- `state = ...`: 받아온 센서 데이터들을 AI가 학습하기 좋은 형태(NumPy 배열 등)로 가공하여 상태로 지정
+- `reward = ...`: 로봇이 목표에 가까워졌으면 플러스 점수, 벽에 박았으면 마이너스 점수를 계산
+- `terminated = ...`: 로봇이 목적지에 도달했거나 벽에 부딪혀서 판이 완전히 끝났는지 체크
+- `truncated = False`: 제한 시간 초과 등으로 인해 강제로 중단되었는지 여부 설정
+- `return state, reward, ...`: 가공된 상태, 보상, 종료 여부를 AI 알고리즘에게 넘겨주어 다음 행동을 유도
+
+## 5. ROS2 통신 흐름
+### Action (행동)
+```
+SB3 -> action -> ROS2 Publisher -> cmd_vel
+```
+#### example)
+- 선속도
+- 각속도
+### Observation (상태)
+```
+LiDAR / Camera / Joint -> ROS2 Subscriber -> state vector
+```
+### Reward (보상)
+```
+목표 거리 / 충돌 / 안정성 -> reward 계산
+```
+### Reset
+```
+ROS2 Service -> 위치 초기화
+```
+
+## 6. TurtleBot 예시 (실무 기준)
+### 상태 (Observation)
+```py
+state = [
+    distance_to_goal,
+    angle_to_goal,
+    lidar_min_distance
+]
+```
+### 행동 (Action)
+```py
+action = [
+    linear_velocity,
+    angular_velocity
+]
+```
+### 보상 (Reward)
+```py
+reward = -distance_to_goal
+if collision:
+    reward -= 100
+
+if goal_reached:
+    reward += 100
+```
+### 종료 (Done)
+```py
+terminated = collision or goal_reached
+```
+
+## 7. 전체 코드 흐름
+```
+1. SB3가 action 생성
+2. ROS2에 publish
+3. 로봇 움직임
+4. 센서 데이터 수신
+5. state 구성
+6. reward 계산
+7. SB3 업데이트
+```
+### 위의 루프가 계속 반복
+
+## 8. 실무 아키텍처
+```
+[ SB3 Trainer ]
+        ↓
+[ Gym Wrapper (ROS2Env) ]
+        ↓
+[ ROS2 Bridge Node ]
+        ↓
+[ Simulator (Gazebo / MuJoCo) ]
+        ↓
+[ Sensor Streams ]
+        ↓
+[ Reward Engine ]
+        ↓
+[ Logging / Monitoring ]
+```
+
+## 9. 실무에서 반드시 고려해야 할 요소
+### 1. 동기화 문제
+- step() 타이밍 중요
+- ROS2는 비동기 구조
+
+### 2. 센서 노이즈
+- 실제 환경과 다름
+
+### 3. 지연(latency)
+- action → 반응 지연 존재
+
+### 4. reward 설계
+- 현실적이어야 함
+
+### 5. 안전성
+- 로봇 폭주 방지 필수
+
+## 10. 실무에서 가장 많이 하는 실수
+### 1. step() 동기화 안 함
+- 데이터 꼬임
+
+### 2. 센서 raw 값 그대로 사용
+- 학습 불안정
+
+### 3. reward 너무 단순
+- 학습 실패
+
+### 4. reset 제대로 안 됨
+- episode 깨짐
+
+### 5. 실제 로봇 바로 적용
+- 반드시 시뮬레이터 먼저
+
+## 11. 확장 흐름 (중요)
+### 1단계
+CartPole (완료)
+
+### 2단계
+Custom Gym Env (완료)
+
+### 3단계
+ROS2 + Gazebo
+
+### 4단계
+MuJoCo / Isaac Gym
+
+### 5단계
+실제 로봇 적용
+
+## 12. 전체 과정 요약
+### 핵심 흐름
+```
+SB3 → ROS2 → Sim → Reward → SB3
+```
+### 핵심 역량
+- 환경 설계
+- 보상 설계
+- 알고리즘 선택
+- 학습 분석
+- 시스템 통합
